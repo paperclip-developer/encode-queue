@@ -14,6 +14,167 @@ import (
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-6 }
 
+// iphoneblog's install sets these (EQ_POINTS_MASTER_FPS, EQ_POINTS_TIME_ZONE); the tests run on
+// its config unless they say otherwise.
+const iphoneblogFPS = 25
+
+var iphoneblogZone = func() *time.Location {
+	l, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		panic(err)
+	}
+	return l
+}()
+
+// pointsJobs is one job of every kind that earns, and the cases that fall back to the masters'
+// rate.
+func pointsJobs() []struct {
+	name string
+	j    *Job
+	l    *Lease
+} {
+	src := func(s SourceIn) JobSubmit { return JobSubmit{Source: s} }
+	return []struct {
+		name string
+		j    *Job
+		l    *Lease
+	}{
+		{"rung 4K slower", &Job{rung: &RungParams{Codec: "libx265", Width: 3840, Height: 2160, Preset: "slower"}, Spec: src(SourceIn{DurationS: 7200, Frames: 180000})}, &Lease{}},
+		{"rung 1080 slow", &Job{rung: &RungParams{Codec: "libx265", Width: 1920, Height: 1080, Preset: "slow"}, Spec: src(SourceIn{DurationS: 1800, Frames: 45000})}, &Lease{}},
+		{"cut with frames", &Job{cut: &CutParams{LengthS: 30, Preset: "veryfast"}, Spec: src(SourceIn{DurationS: 1800, Frames: 54000, Width: 3840, Height: 1920})}, &Lease{}},
+		{"cut without frames", &Job{cut: &CutParams{LengthS: 30, Preset: "veryfast"}, Spec: src(SourceIn{DurationS: 1800, Width: 3840, Height: 1920})}, &Lease{}},
+		{"remux with frames", &Job{remux: &RemuxParams{}, Spec: src(SourceIn{DurationS: 7200, Frames: 216000, Width: 3840, Height: 2160})}, &Lease{}},
+		{"remux without frames", &Job{remux: &RemuxParams{}, Spec: src(SourceIn{DurationS: 7200, Width: 3840, Height: 2160})}, &Lease{}},
+		{"check without frames", &Job{check: &CheckParams{}, Spec: src(SourceIn{DurationS: 7200, Width: 3840, Height: 1080})}, &Lease{}},
+		{"check of an odd length", &Job{check: &CheckParams{}, Spec: src(SourceIn{DurationS: 1001.37, Width: 1920, Height: 1080})}, &Lease{}},
+		{"audio check", &Job{check: &CheckParams{}, Spec: src(SourceIn{DurationS: 3600})}, &Lease{}},
+		{"whisper turbo", &Job{whisper: &WhisperParams{Models: []string{SHALargeV3Turbo}}, Spec: src(SourceIn{DurationS: 3600})}, &Lease{Model: SHALargeV3Turbo}},
+		{"align", &Job{align: &AlignParams{}, Spec: src(SourceIn{DurationS: 3600})}, &Lease{}},
+	}
+}
+
+// Funkhaus ADR-0008 §12 rule 1: with iphoneblog's config the points are today's to the bit. The
+// numbers are what v0.2.26 printed with its constants (25 fps, Europe/Berlin), before they went.
+func TestIphoneblogsConfigGivesTodaysPoints(t *testing.T) {
+	want := map[string]float64{
+		"rung 4K slower":         1313.75685425,
+		"rung 1080 slow":         25.71206953125,
+		"cut with frames":        0.44279810016000004,
+		"cut without frames":     0.36899841680000006,
+		"remux with frames":      92.3076923076923,
+		"remux without frames":   76.92307692307692,
+		"check without frames":   22.79635258358663,
+		"check of an odd length": 1.5852330293819656,
+		"audio check":            0,
+		"whisper turbo":          4.701572761587567,
+		"align":                  0.6599999999999999,
+	}
+	for _, c := range pointsJobs() {
+		if got := jobPoints(c.j, c.l, iphoneblogFPS); got != want[c.name] {
+			t.Errorf("%s: %v, v0.2.26 gave %v", c.name, got, want[c.name])
+		}
+	}
+	// The day and the week's Monday, around midnight and both of 2026's clock changes.
+	e := newEnv(t, "")
+	for _, c := range []struct{ at, day, monday string }{
+		{"2026-11-01T22:30:00Z", "2026-11-01", "2026-10-26"},
+		{"2026-11-01T23:30:00Z", "2026-11-02", "2026-11-02"},
+		{"2026-03-28T23:30:00Z", "2026-03-29", "2026-03-23"},
+		{"2026-03-29T22:30:00Z", "2026-03-30", "2026-03-30"},
+		{"2026-10-24T22:30:00Z", "2026-10-25", "2026-10-19"},
+		{"2026-10-25T22:59:00Z", "2026-10-25", "2026-10-19"},
+		{"2026-10-25T23:00:00Z", "2026-10-26", "2026-10-26"},
+		{"2026-12-31T23:15:00Z", "2027-01-01", "2026-12-28"},
+	} {
+		if day, monday := pointsDays(t, e, c.at); day != c.day || monday != c.monday {
+			t.Errorf("%s: day %s, Monday %s; v0.2.26 gave %s, %s", c.at, day, monday, c.day, c.monday)
+		}
+	}
+}
+
+// pointsDays is the day a point earned at `at` (RFC 3339) lands on, and the first day its week
+// counts, read back through the ledger and the view.
+func pointsDays(t *testing.T, e *env, at string) (day, monday string) {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Add(ts.Sub(e.clock.Now()))
+	w := &Worker{}
+	e.s.award(w, &Job{align: &AlignParams{}, Spec: JobSubmit{Source: SourceIn{DurationS: 1}}}, &Lease{})
+	for d := range w.Points.Days {
+		day = d
+	}
+	// Walk back a day at a time while a point on that day still counts this week.
+	monday = day
+	for i := 1; i < 7; i++ {
+		d, _ := time.Parse(dayLayout, day)
+		prev := d.AddDate(0, 0, -i).Format(dayLayout)
+		w.Points.Days = map[string]float64{prev: 1}
+		if e.s.pointsView(w).Week == 0 {
+			break
+		}
+		monday = prev
+	}
+	return day, monday
+}
+
+// Another install, another rate and zone: different points and a different day.
+func TestAnotherInstallsConfigGivesItsOwnPoints(t *testing.T) {
+	for _, c := range pointsJobs() {
+		at25, at30 := jobPoints(c.j, c.l, iphoneblogFPS), jobPoints(c.j, c.l, 30)
+		// Only a job that names its length but not its frames reads the rate.
+		reads := strings.HasSuffix(c.name, "without frames") || c.name == "check of an odd length"
+		if reads && at30 == at25 {
+			t.Errorf("%s: %v at 30 fps as at 25", c.name, at30)
+		}
+		if !reads && at30 != at25 {
+			t.Errorf("%s: %v at 30 fps, %v at 25", c.name, at30, at25)
+		}
+	}
+	// A check of two hours at 30 fps: 216000 frames.
+	check := pointsJobs()[6].j
+	if got := jobPoints(check, &Lease{}, 30); !near(got, 216000/(65.8*60)/2) {
+		t.Errorf("a check at 30 fps: %v", got)
+	}
+	// Without a rate such a job earns nothing; one that names its frames still does.
+	for _, c := range pointsJobs() {
+		if strings.HasSuffix(c.name, "without frames") {
+			if got := jobPoints(c.j, c.l, 0); got != 0 {
+				t.Errorf("%s without a rate: %v", c.name, got)
+			}
+		}
+	}
+	if got := jobPoints(pointsJobs()[4].j, &Lease{}, 0); got <= 0 {
+		t.Errorf("a remux with frames without a rate: %v", got)
+	}
+
+	// New York: 23:30 in Berlin on Sunday 1 November is 18:30 there, still Sunday; Monday starts
+	// six hours after Berlin's.
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, "")
+	e.s.cfg.PointsZone, e.s.cfg.PointsMasterFPS = ny, 30
+	for _, c := range []struct{ at, day, monday string }{
+		{"2026-11-01T23:30:00Z", "2026-11-01", "2026-10-26"},
+		{"2026-11-02T04:59:00Z", "2026-11-01", "2026-10-26"},
+		{"2026-11-02T05:00:00Z", "2026-11-02", "2026-11-02"},
+	} {
+		if day, monday := pointsDays(t, e, c.at); day != c.day || monday != c.monday {
+			t.Errorf("New York at %s: day %s, Monday %s; want %s, %s", c.at, day, monday, c.day, c.monday)
+		}
+	}
+	// Unset, the zone is UTC.
+	var cfg Config
+	cfg.Defaults()
+	if cfg.PointsZone != time.UTC || cfg.PointsMasterFPS != 0 {
+		t.Fatalf("the defaults: %v, %v", cfg.PointsZone, cfg.PointsMasterFPS)
+	}
+}
+
 func TestPunkteTabelleV1(t *testing.T) {
 	rung := func(codec string, w, h int, preset string) *RungParams {
 		return &RungParams{Codec: codec, Width: w, Height: h, Preset: preset}
@@ -48,40 +209,40 @@ func TestPunkteTabelleV1(t *testing.T) {
 	// times small's time) about 4.6.
 	j := &Job{whisper: &WhisperParams{Models: []string{SHALargeV3Turbo, SHAMedium}}}
 	j.Spec.Source.DurationS = 3600
-	if got := jobPoints(j, &Lease{Model: SHALargeV3Turbo}); !near(got, 3600/(12.761687001891676*60)) {
+	if got := jobPoints(j, &Lease{Model: SHALargeV3Turbo}, iphoneblogFPS); !near(got, 3600/(12.761687001891676*60)) {
 		t.Errorf("an hour of turbo: %v", got)
 	}
-	if got := jobPoints(j, &Lease{Model: SHAMedium}); !near(got, 3600*2.5/(32.336355149617205*60)) {
+	if got := jobPoints(j, &Lease{Model: SHAMedium}, iphoneblogFPS); !near(got, 3600*2.5/(32.336355149617205*60)) {
 		t.Errorf("an hour of medium: %v", got)
 	}
 	// Without the audio's length the queue cannot price it.
 	j.Spec.Source.DurationS = 0
-	if got := jobPoints(j, &Lease{Model: SHALargeV3Turbo}); got != 0 {
+	if got := jobPoints(j, &Lease{Model: SHALargeV3Turbo}, iphoneblogFPS); got != 0 {
 		t.Errorf("whisper without duration_s: %v", got)
 	}
 	// Cut, remux and check earn too (Thorsten, 2026-10-28). A cut is an encode of its frames in
 	// its class: 30 s of a 25 fps 3840x1920 Folge at x264 veryfast, priced from 1280x720.
 	cut := &Job{cut: &CutParams{LengthS: 30, Preset: "veryfast"}}
 	cut.Spec.Source = SourceIn{DurationS: 1800, Frames: 45000, Width: 3840, Height: 1920}
-	if got, want := jobPoints(cut, &Lease{}), 750/(271.00387277325575*1280*720/(3840*1920)*60); !near(got, want) {
+	if got, want := jobPoints(cut, &Lease{}, iphoneblogFPS), 750/(271.00387277325575*1280*720/(3840*1920)*60); !near(got, want) {
 		t.Errorf("a cut: %v, want %v", got, want)
 	}
 	// A remux and a check of a 2-hour 4K master: its frames at the measured speed.
 	remux := &Job{remux: &RemuxParams{}}
 	remux.Spec.Source = SourceIn{DurationS: 7200, Frames: 180000, Width: 3840, Height: 2160}
-	if got := jobPoints(remux, &Lease{}); !near(got, 180000/(39.0*60)) {
+	if got := jobPoints(remux, &Lease{}, iphoneblogFPS); !near(got, 180000/(39.0*60)) {
 		t.Errorf("a remux: %v", got)
 	}
 	// The score check names no frames: its length at 25 fps; half the pixels, half the price.
 	check := &Job{check: &CheckParams{}}
 	check.Spec.Source = SourceIn{DurationS: 7200, Width: 3840, Height: 1080}
-	if got := jobPoints(check, &Lease{}); !near(got, 180000/(65.8*60)/2) {
+	if got := jobPoints(check, &Lease{}, iphoneblogFPS); !near(got, 180000/(65.8*60)/2) {
 		t.Errorf("a score check: %v", got)
 	}
 	// An audio check names no size and earns nothing.
 	audio := &Job{check: &CheckParams{}}
 	audio.Spec.Source = SourceIn{DurationS: 3600}
-	if got := jobPoints(audio, &Lease{}); got != 0 {
+	if got := jobPoints(audio, &Lease{}, iphoneblogFPS); got != 0 {
 		t.Errorf("an audio check: %v", got)
 	}
 }
@@ -253,7 +414,7 @@ func TestPointsDoNotSteerTheScoring(t *testing.T) {
 	e, enc, mac := scored(t)
 	e.rung("h264.2160-archive", "archive")
 	e.sized("h264.2160-archive", 400e6)
-	e.s.st.Workers[enc].Points = &PointsLedger{Total: 1e9, Days: map[string]float64{e.clock.Now().In(berlin).Format(dayLayout): 1e9}}
+	e.s.st.Workers[enc].Points = &PointsLedger{Total: 1e9, Days: map[string]float64{e.clock.Now().In(iphoneblogZone).Format(dayLayout): 1e9}}
 	if l := e.claim(enc); l != nil {
 		t.Fatalf("encoder took a job the Mac finishes in a third of the time: %+v", l)
 	}

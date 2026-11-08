@@ -1,7 +1,7 @@
 """Qwen3-ForcedAligner-0.6B for encode-queue's align job (v0.2.16): the words of a text, timed in
 the sound, in whisper-cli's `-oj` shape, one segment per word. The worker embeds this script and
 runs it with the aligner's own Python: MLX and mlx-qwen3-asr on a Mac, PyTorch and qwen-asr on
-Linux. Measured for iPhoneblog's captions in video-pipeline's docs/aligner-timing.md (#24).
+Linux. Measured in video-pipeline's docs/aligner-timing.md (#24).
 
     align.py version
     align.py run --model DIR --wav WAV --words WORDS.json --language de --out OUT.json

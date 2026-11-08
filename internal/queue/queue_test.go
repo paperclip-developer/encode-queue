@@ -45,6 +45,7 @@ func newEnv(t *testing.T, ref string) *env {
 	cfg := Config{StateDir: filepath.Join(dir, "state"), SourceDir: filepath.Join(dir, "src"), ReferenceWorker: ref,
 		Subnet: netip.MustParsePrefix("10.10.20.0/24"), TunnelAddress: netip.MustParseAddr("10.10.20.1"),
 		ServerPublicKey: "c2VydmVyc2VydmVyc2VydmVyc2VydmVyc2VydmVyMDA=", Endpoint: "vpn.example.org:51821", API: "http://10.10.20.1:8090/v1",
+		PointsZone: iphoneblogZone, PointsMasterFPS: iphoneblogFPS,
 		Now: c.Now, FreeBytes: func(string) (int64, error) { return 1 << 40, nil }}
 	os.MkdirAll(cfg.SourceDir, 0o755)
 	s, err := Open(cfg)

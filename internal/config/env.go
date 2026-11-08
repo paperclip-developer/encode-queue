@@ -3,10 +3,12 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // the zones in the distroless image, which has no zoneinfo
 )
 
 // Env reads variables and collects every problem, so a start fails once with all of them.
@@ -70,6 +72,34 @@ func (e *Env) Int64(k string, def int64) int64 {
 		e.Problems = append(e.Problems, fmt.Sprintf("%s=%q is not a whole number", k, v))
 	}
 	return n
+}
+
+// Float is a number of 0 or more, with a default.
+func (e *Env) Float(k string, def float64) float64 {
+	v, ok := e.get(k)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || n < 0 || math.IsInf(n, 0) || math.IsNaN(n) {
+		e.Problems = append(e.Problems, fmt.Sprintf("%s=%q is not a number of 0 or more", k, v))
+		return def
+	}
+	return n
+}
+
+// Location is a time zone by its IANA name (`Europe/Lisbon`), nil when unset.
+func (e *Env) Location(k string) *time.Location {
+	v, ok := e.get(k)
+	if !ok || v == "" {
+		return nil
+	}
+	l, err := time.LoadLocation(v)
+	if err != nil {
+		e.Problems = append(e.Problems, fmt.Sprintf("%s=%q is not a time zone", k, v))
+		return nil
+	}
+	return l
 }
 
 // Seconds is a duration in whole seconds, 0 (the caller's default) when unset.

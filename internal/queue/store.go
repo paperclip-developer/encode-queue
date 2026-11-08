@@ -37,6 +37,13 @@ type Config struct {
 
 	ReferenceWorker string // the worker whose tools jobs require by default; "" requires none
 
+	// The points' clock and masters' rate are the install's (v0.2.28, Funkhaus ADR-0008 package
+	// 1). PointsZone's midnight starts a day and its Monday a week (UTC when unset).
+	// PointsMasterFPS prices a job that names its length but not its frames (a score check, a
+	// cut of a source without frames); 0 and such a job earns nothing.
+	PointsZone      *time.Location
+	PointsMasterFPS float64
+
 	// **A rogue worker cannot hold everything** (v0.2.9; security review M2, 2026-10-27): a
 	// worker sets its own max_parallel_jobs and reports its own calibrated speed, and a lease
 	// renewed every 30 s never ran out. MaxParallelJobs caps the normal slots of every worker (2),
@@ -98,6 +105,9 @@ func (c *Config) Defaults() {
 	}
 	if c.Keepalive == 0 {
 		c.Keepalive = 25
+	}
+	if c.PointsZone == nil {
+		c.PointsZone = time.UTC
 	}
 	if c.Now == nil {
 		c.Now = time.Now
